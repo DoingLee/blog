@@ -1,0 +1,24 @@
+spring cloud euraka 原理
+
+
+Eureka 运行机制：
+
+1、Eureka server 的一个节点启动时，会从其他节点拉取服务提供者注册列表信息
+2、服务注册：Eureka client （服务提供者、服务消费者）和 Eureka server （服务注册中心自己）启动后，都会向注册中心注册服务（如果配置了注册）
+3、服务续约：服务注册后，要定时（默认30s）向注册中心发送续约请求，告诉注册中心“我还活着”
+4、服务注销：服务正常停止之前会向注册中心发送注销请求，告诉注册中心“我要下线了”
+5、服务剔除：对于没有正常停止下线的服务，需要注册中心定时运行服务剔除任务，剔除没有按时续约的服务。
+	- 如果Eureka注册中心开启了自我保护机制，为了防止误杀服务，在进入剔除流程前，会先计算上一分钟的续约数是否大于自我保护阈值：如果超出阈值就表示大量服务可用，少量服务不可用，则判定是 Eureka Client 出了问题，进入剔除流程；如果未超出阈值就表示大量服务不可用，则判定是 Eureka Server 出问题，不进入剔除流程。
+6、服务同步：当Eureka server中的一个节点收到client的注册、下线、续约等操作时，不仅会更新本地内存数据存储中的数据，还会通过批任务流的方式（减少网络同步消耗）同步到其他所有节点
+	- 同步冲突：在Euerka Server同步的过程如果出现同一服务实例在两个Server的信息不一致的信息冲突，将如何进行处理？：通过比较两个节点的lastDirtyTimestamp(服务实例信息上次变动的时间戳)来判断哪边的数据是新的，然后新数据节点的服务实例信息会覆盖到老数据节点的该服务实例信息上
+	- 由于Eureka Server中的信息同步是通过HTTP的方式，难免会出现网络延迟，造成同步复制的延时性，不满足CAP中的C(强一致性)，而满足最终一致性。
+7、服务获取机制：
+	- Eureka 注册中心存储结构：
+
+	- Eureka 使用 两级缓存层 + 数据存储层 来存储服务注册者信息列表。
+		- 数据存储层registry本质上是一个双层的 ConcurrentHashMap，存储在内存中。第一层的 key 是spring.application.name，value 是第二层 ConcurrentHashMap；第二层 ConcurrentHashMap 的 key 是服务的 InstanceId，value 是 Lease 对象；Lease 对象包含了服务提供者的详细信息。
+		- 两级缓存层中保存的是经过处理加工过的、可以直接传输到 Eureka Client 的数据结构。其中一级缓存ConcurrentHashMap<Key,Value> readOnlyCacheMap本质上是 HashMap，无过期时间，保存服务信息的对外输出数据结构，只读不写；二级缓存Loading<Key,Value> readWriteCacheMap本质上是 guava 缓存，可以读或写。
+	- 当服务提供者的信息列表变更（服务提供者注册、下线、剔除）时，会清空readWriteCacheMap二级缓存。
+	- 同时，Eureka Server 内置了一个 TimerTask，定时将readWriteCacheMap二级缓存中的数据同步到readOnlyCacheMap一级缓存（包括清空缓存、加载缓存）。通过该两级缓存的结构，实现了“读写分离”的效果。
+	- 服务消费者的Eureka Client在拉取服务提供者信息时，会先从缓存层获取；如果获取不到，则先把数据存储层的数据加载到缓存中，再从缓存中获取。
+
